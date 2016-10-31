@@ -32,6 +32,21 @@
 //[  509.458668] <1> freeing allocated virtual apic page region!
 //[  509.458670] <1> freeing allocated vmxon region!
 ///////////////////////////////////////////////
+
+/* Min Xu
+ * Procedure Outline
+ * 1. Main thread creates the per-VP data, including VMXON, VMCS, MSR_BITMAP, etc.;
+ * 2. Initialize the VP
+ * 	a. Store some EPT related metadata in the VP data;
+ *	b. Set the physical addresses of the VMXON and VMCS
+ *	c. Set the rev_id of the VMXON and VMCS;
+ * 	d. Turn on VMX by setting cr4.vmxe bit;
+ * 	e. Do VMXON;
+ * 	f. Capture some system state in VP data;
+ *      g. Load the guest VMCS as current active VMCS;
+ *	h. Initialize the guest VMCS, as well as setting the corresponding fields in the VP data;
+ *	i. Launch the guest VM. 
+ */
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -87,7 +102,6 @@ static unsigned long do_vmread(unsigned long field);
 #define MY_VMX_VMCALL            ".byte 0x0f, 0x01, 0xc1"
 #define MY_HLT            	 ".byte 0xf4" 
 
-
 static unsigned long do_vmread(unsigned long field) {
 	asm volatile (MY_VMX_VMREAD_RDX_RAX
 		      : "=a"(value) : "d"(field) : "cc");
@@ -129,7 +143,7 @@ static void do_vmwrite64(unsigned long field, u64 value) {
     do_vmwrite(field, value);
 }
 
-static void initialize_16bit_host_guest_state(void) {
+static void initialize_16bit_host_guest_state(PVP_DATA data) {
    unsigned long field,field1;
    u16 	    value;
    field = VMX_HOST_ES_SEL;
@@ -187,7 +201,7 @@ static void initialize_16bit_host_guest_state(void) {
 
 }
 
-static void initialize_64bit_control(void) {
+static void initialize_64bit_control(PVP_DATA data) {
    unsigned long field;
    u64 	    value;
 
@@ -221,7 +235,7 @@ static void initialize_64bit_control(void) {
 
 }
 
-static void initialize_64bit_host_guest_state(void) {
+static void initialize_64bit_host_guest_state(PVP_DATA data) {
    unsigned long field;
    u64 	    value;
    field = VMX_VMS_LINK_PTR_FULL;
@@ -232,7 +246,7 @@ static void initialize_64bit_host_guest_state(void) {
    do_vmwrite64(field,value); 
 }
 
-static void initialize_32bit_control(void) {
+static void initialize_32bit_control(PVP_DATA data) {
    unsigned long field;
    u32 	    value;
 
@@ -297,7 +311,7 @@ static void initialize_32bit_control(void) {
    do_vmwrite32(field,value);
 }
 
-static void initialize_32bit_host_guest_state(void) {
+static void initialize_32bit_host_guest_state(PVP_DATA data) {
    unsigned long field;
    u32 	    value;
    u64      gdtb;
@@ -479,7 +493,7 @@ static void initialize_32bit_host_guest_state(void) {
    do_vmwrite32(field,value); 
 }
 
-static void initialize_naturalwidth_control(void){
+static void initialize_naturalwidth_control(PVP_DATA data){
    unsigned long field;
    u64 	    value;
 
@@ -515,7 +529,7 @@ static void initialize_naturalwidth_control(void){
    do_vmwrite64(field,value); 
 }
 
-static void initialize_naturalwidth_host_guest_state(void) {
+static void initialize_naturalwidth_host_guest_state(PVP_DATA data) {
    unsigned long field,field1;
    u64 	    value;
    int      fs_low;
@@ -580,7 +594,6 @@ static void initialize_naturalwidth_host_guest_state(void) {
    do_vmwrite64(field,value); 
 
 
-
    field1 = VMX_GUEST_DR7;
    value = 0x400;
    do_vmwrite64(field1,value); 
@@ -633,15 +646,53 @@ static void initialize_naturalwidth_host_guest_state(void) {
 }
 
 
+static uint32_t adjust_msr(uint64_t msr, uint32_t desired) {
+   desired &= uint32_t(msr>>32);
+   desired |= uint32_t(msr&0xffffffff);
+   return desired;
+}
 
-static void initialize_guest_vmcs(void){
-    initialize_16bit_host_guest_state();
-    initialize_64bit_control();
-    initialize_64bit_host_guest_state();
-    initialize_32bit_control();
-    initialize_naturalwidth_control();
-    initialize_32bit_host_guest_state();
-    initialize_naturalwidth_host_guest_state();
+static void initialize_guest_vmcs(PVP_DATA data){
+    vmx_eptp temp_eptp;
+
+    // Enable EPT features if required
+    if (data->ept_ctl != 0) {
+	vmx_eptp.as_ull = 0;
+        vmx_eptp.pg_wk_len = 3;
+        vmx_eptp.type = MTRR_TYPE_WB;
+        vmx_eptp.pg_fr_no = data->ept_pml4_phy_addr / PAGE_SIZE;
+        
+        do_vmwrite(VMX_EPT_POINTER_FULL,vmx_eptp.as_ull); 
+        do_vmwrite(VMX_VPID,1);
+    }
+ 
+    // Enable several features for the guest VM
+    do_vmwrite(VMX_PROC_VM_EXEC_CONTROLS2,adjust_msr(data->msr[11],
+						SECONDARY_EXEC_ENABLE_RDTSCP |
+                                            	SECONDARY_EXEC_XSAVES |
+                                            	data->ept_ctl));
+ 
+    do_vmwrite(VMX_PIN_VM_EXEC_CONTROLS,adjust_msr(data->msr[13],0));
+
+    do_vmwrite(VMX_PROC_VM_EXEC_CONTROLS,adjust_msr(data->msr[14],
+						CPU_BASED_ACTIVATE_MSR_BITMAP |
+                                            	CPU_BASED_ACTIVATE_SECONDARY_CONTROLS));
+
+    do_vmwrite(VMX_EXIT_CONTROLS,adjust_msr(data->msr[15],
+						VM_EXIT_ACK_INTR_ON_EXIT |
+                                            	VM_EXIT_IA32E_MODE));
+
+    do_vmwrite(VMX_ENTRY_CONTROLS,adjust_msr(data->msr[16], VM_ENTRY_IA32E_MODE));
+
+    initialize_16bit_host_guest_state(data);
+
+    // Set the MSR BITMAP here
+    initialize_64bit_control(data);
+    initialize_64bit_host_guest_state(data);
+    initialize_32bit_control(data);
+    initialize_naturalwidth_control(data);
+    initialize_32bit_host_guest_state(data);
+    initialize_naturalwidth_host_guest_state(data);
 }
 
 
@@ -766,6 +817,13 @@ static uint64_t readcr0(void) {
    return value; 
 }
 
+static void writecr0(uint64_t cr0) {
+   asm volatile("movq %0,%%cr0\n"
+		:
+		: "a" (cr0)
+		);
+}
+
 static uint64_t readcr3(void){
    uint64_t value;
    asm volatile("movq %%cr3, %0\n"
@@ -780,6 +838,13 @@ static uint64_t readcr4(void){
 	 	: "=a" (value)
 		);
    return value;
+}
+
+static void writecr4(uint64_t cr4) {
+   asm volatile("movq %0, %%cr4\n"
+		:
+		: "a" (cr4)
+		);
 }
 
 static uint64_t readdr7(void){
@@ -842,9 +907,16 @@ static uint64_t readeflags(void){
    return value;
 } 
 
+static void capture_context(PVP_DATA data) {
+   asm volatile("movw %%cs, %%ax\n"
+		: "=a" (data->context.cs)
+		);
+}
+
 static uint64_t vmx_launch_on_vp(PVP_DATA data) {
    vmx_huge_pdpte temp;
 
+   // Read VMX related MSRs
    for(int i=0;i<sizeof(data->msr_data)/sizeof(data->msr_data[0]);i++)
 	data->msr[i] = readmsr(MSR_IA32_VMX_BASIC+i);
 
@@ -888,12 +960,20 @@ static uint64_t vmx_launch_on_vp(PVP_DATA data) {
    }
 
    // Capture the revision ID for VMXON and VMCS region
+   vmxon_setup_revid();
    data->vmxon.rev_id = vmx_rev_id;
    data->vmcs.rev_id = vmx_rev_id;
 
+   // Set the global variables
+   vmxon_region = &data->vmxon;
+   vmxon_phy_region = __pa(vmxon_region);
+   vmcs_guest_region = &data->vmcs;
+   msr_bitmap_region = &data->msr_bitmap[0]; 
+
+  
    // Store the physical addresses of all per-LP structures allocated
    data->vmxon_phy_addr = __pa(&data->vmxon);
-   data->vmcs_phy_addr = __pa(data->vmcs);
+   data->vmcs_phy_addr = __pa(&data->vmcs);
    data->msr_bitmap_phy_addr = __pa(data->msr_bitmap);
    data->ept_pml4_phy_addr = __pa(data->epml4);
 
@@ -904,39 +984,21 @@ static uint64_t vmx_launch_on_vp(PVP_DATA data) {
    // Do the same for CR4
    data->sp_regs.cr4 &= (data->msr[9]&0xffffffff);
    data->sp_regs.cr4 |= (data->msr[8]&0xffffffff);
-
-   // Update host cr0 and cr4
-   asm volatile("movq %0, %%cr0\n"
-		:
-		: "a" (data->sp_regs.cr0)
-		);
-
-   asm volatile("movq %0, %%cr4\n"
-		:
-		: "a" (data->sp_regs.cr4)
-		);
-
-   // Enable the VMX Root Mode
-   vmxon_phy_region = data->vmxon_phy_addr;
+  
+   // Update the host cr0 and cr4 based on above requirements
+   writecr0(data->sp_regs.cr0);
+   writecr4(data->sp_regs.cr4);
+  
+   // Turn on VMX Root Mode
+   turn_on_vmxe();
    do_vmxon();
 
-   // Clear the state of VMCS, setting it to Inactive
-   do_vmclear();  
-
-   // Load the VMCS, setting its state to Active
+   // Load the guest VM as current VMCS
+   do_vmclear();
    do_vmptrld();
 
-   // Initialize the VMCS, both guest and host state.
-   initialize_64bit_host_guest_state();
-
-   // Enable EPT features if supported
-   if (data->ept_ctl != 0){
-	do_vmwrite(VMX_EPT_POINTER_FULL, 0ULL);
-        do_vmwrite(VMX_VPID,1);
-   }
-   
-
-   // Launch the VMCS
+   // Invoke the initialization procedures
+   initialize_guest_vmcs(data);
 }
 
 /*initialize virtual processor*/
@@ -955,7 +1017,10 @@ static int initialize_vp(PVP_DATA data) {
    sldt(&data->sp_regs.ldtr);
 
    // Capture current caller task_struct
-   memcpy(&data->context,current,sizeof(struct task_struct));
+   // The save_processor_state API stores the processor state internally,
+   // Hopefully, when invoking restore_processor_state, the proper 
+   // processor state can be restored.
+   capture_context(data);
 
    // Initialze the VMX on this processor
    if((readeflags() & EFLAGS_ALIGN_CHECK) == 0) {
@@ -1129,6 +1194,7 @@ static int vmxon_init(void) {
    // Initialize the virtual processor
    status = initialize_vp(vp_data);
     
+   /*
    allocate_vmxon_region();
 
    if(vmxon_region==NULL){
@@ -1139,7 +1205,7 @@ static int vmxon_init(void) {
    }
 
    vmxon_phy_region = __pa(vmxon_region);
-   vmxon_setup_revid();
+   //vmxon_setup_revid();
    memcpy(vmxon_region, &vmx_rev_id, 4); //copy revision id to vmxon region
    turn_on_vmxe();
    do_vmxon();
@@ -1157,6 +1223,7 @@ static int vmxon_init(void) {
    memcpy(vmcs_guest_region, &vmx_rev_id, 4); //copy revision id to vmcs region
    do_vmptrld();
    initialize_guest_vmcs();
+   */
 
    // do_vmlaunch();
    //host rip

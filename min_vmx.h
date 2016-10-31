@@ -1,3 +1,4 @@
+#include <linux/suspend.h>
 
 #define DPL_USER                3
 #define DPL_SYSTEM              0
@@ -26,9 +27,133 @@
 #define PML4E_ENTRY_COUNT 512
 #define PDPTE_ENTRY_COUNT 512
 
-/* MSRs & bits used for VMX enabling */
-#define MSR_IA32_VMX_BASIC                      	0x480
+/* Migrated from SimpleVisor/vmx.h */
+#define CPU_BASED_VIRTUAL_INTR_PENDING          0x00000004
+#define CPU_BASED_USE_TSC_OFFSETING             0x00000008
+#define CPU_BASED_HLT_EXITING                   0x00000080
+#define CPU_BASED_INVLPG_EXITING                0x00000200
+#define CPU_BASED_MWAIT_EXITING                 0x00000400
+#define CPU_BASED_RDPMC_EXITING                 0x00000800
+#define CPU_BASED_RDTSC_EXITING                 0x00001000
+#define CPU_BASED_CR3_LOAD_EXITING              0x00008000
+#define CPU_BASED_CR3_STORE_EXITING             0x00010000
+#define CPU_BASED_CR8_LOAD_EXITING              0x00080000
+#define CPU_BASED_CR8_STORE_EXITING             0x00100000
+#define CPU_BASED_TPR_SHADOW                    0x00200000
+#define CPU_BASED_VIRTUAL_NMI_PENDING           0x00400000
+#define CPU_BASED_MOV_DR_EXITING                0x00800000
+#define CPU_BASED_UNCOND_IO_EXITING             0x01000000
+#define CPU_BASED_ACTIVATE_IO_BITMAP            0x02000000
+#define CPU_BASED_MONITOR_TRAP_FLAG             0x08000000
+#define CPU_BASED_ACTIVATE_MSR_BITMAP           0x10000000
+#define CPU_BASED_MONITOR_EXITING               0x20000000
+#define CPU_BASED_PAUSE_EXITING                 0x40000000
+#define CPU_BASED_ACTIVATE_SECONDARY_CONTROLS   0x80000000
 
+#define PIN_BASED_EXT_INTR_MASK                 0x00000001
+#define PIN_BASED_NMI_EXITING                   0x00000008
+#define PIN_BASED_VIRTUAL_NMIS                  0x00000020
+#define PIN_BASED_PREEMPT_TIMER                 0x00000040
+#define PIN_BASED_POSTED_INTERRUPT              0x00000080
+
+#define VM_EXIT_SAVE_DEBUG_CNTRLS               0x00000004
+#define VM_EXIT_IA32E_MODE                      0x00000200
+#define VM_EXIT_LOAD_PERF_GLOBAL_CTRL           0x00001000
+#define VM_EXIT_ACK_INTR_ON_EXIT                0x00008000
+#define VM_EXIT_SAVE_GUEST_PAT                  0x00040000
+#define VM_EXIT_LOAD_HOST_PAT                   0x00080000
+#define VM_EXIT_SAVE_GUEST_EFER                 0x00100000
+#define VM_EXIT_LOAD_HOST_EFER                  0x00200000
+#define VM_EXIT_SAVE_PREEMPT_TIMER              0x00400000
+#define VM_EXIT_CLEAR_BNDCFGS                   0x00800000
+
+#define VM_ENTRY_IA32E_MODE                     0x00000200
+#define VM_ENTRY_SMM                            0x00000400
+#define VM_ENTRY_DEACT_DUAL_MONITOR             0x00000800
+#define VM_ENTRY_LOAD_PERF_GLOBAL_CTRL          0x00002000
+#define VM_ENTRY_LOAD_GUEST_PAT                 0x00004000
+#define VM_ENTRY_LOAD_GUEST_EFER                0x00008000
+#define VM_ENTRY_LOAD_BNDCFGS                   0x00010000
+
+#define SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES 0x00000001
+#define SECONDARY_EXEC_ENABLE_EPT               0x00000002
+#define SECONDARY_EXEC_DESCRIPTOR_TABLE_EXITING 0x00000004
+#define SECONDARY_EXEC_ENABLE_RDTSCP            0x00000008
+#define SECONDARY_EXEC_VIRTUALIZE_X2APIC_MODE   0x00000010
+#define SECONDARY_EXEC_ENABLE_VPID              0x00000020
+#define SECONDARY_EXEC_WBINVD_EXITING           0x00000040
+#define SECONDARY_EXEC_UNRESTRICTED_GUEST       0x00000080
+#define SECONDARY_EXEC_APIC_REGISTER_VIRT       0x00000100
+#define SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY    0x00000200
+#define SECONDARY_EXEC_PAUSE_LOOP_EXITING       0x00000400
+#define SECONDARY_EXEC_ENABLE_INVPCID           0x00001000
+#define SECONDARY_EXEC_ENABLE_VM_FUNCTIONS      0x00002000
+#define SECONDARY_EXEC_ENABLE_VMCS_SHADOWING    0x00004000
+#define SECONDARY_EXEC_ENABLE_PML               0x00020000
+#define SECONDARY_EXEC_ENABLE_VIRT_EXCEPTIONS   0x00040000
+#define SECONDARY_EXEC_XSAVES                   0x00100000
+#define SECONDARY_EXEC_PCOMMIT                  0x00200000
+#define SECONDARY_EXEC_TSC_SCALING              0x02000000
+
+#define VMX_BASIC_REVISION_MASK                 0x7fffffff
+#define VMX_BASIC_VMCS_SIZE_MASK                (0x1fffULL << 32)
+#define VMX_BASIC_32BIT_ADDRESSES               (1ULL << 48)
+#define VMX_BASIC_DUAL_MONITOR                  (1ULL << 49)
+#define VMX_BASIC_MEMORY_TYPE_MASK              (0xfULL << 50)
+#define VMX_BASIC_INS_OUT_INFO                  (1ULL << 54)
+#define VMX_BASIC_DEFAULT1_ZERO                 (1ULL << 55)
+
+#define VMX_EPT_EXECUTE_ONLY_BIT                (1ULL)
+#define VMX_EPT_PAGE_WALK_4_BIT                 (1ULL << 6)
+#define VMX_EPTP_UC_BIT                         (1ULL << 8)
+#define VMX_EPTP_WB_BIT                         (1ULL << 14)
+#define VMX_EPT_2MB_PAGE_BIT                    (1ULL << 16)
+#define VMX_EPT_1GB_PAGE_BIT                    (1ULL << 17)
+#define VMX_EPT_INVEPT_BIT                      (1ULL << 20)
+#define VMX_EPT_AD_BIT                          (1ULL << 21)
+#define VMX_EPT_EXTENT_CONTEXT_BIT              (1ULL << 25)
+#define VMX_EPT_EXTENT_GLOBAL_BIT               (1ULL << 26)
+
+/* MSRs & bits used for VMX enabling */
+#define MSR_IA32_VMX_BASIC                      0x480
+#define MSR_IA32_VMX_PINBASED_CTLS              0x481
+#define MSR_IA32_VMX_PROCBASED_CTLS             0x482
+#define MSR_IA32_VMX_EXIT_CTLS                  0x483
+#define MSR_IA32_VMX_ENTRY_CTLS                 0x484
+#define MSR_IA32_VMX_MISC                       0x485
+#define MSR_IA32_VMX_CR0_FIXED0                 0x486
+#define MSR_IA32_VMX_CR0_FIXED1                 0x487
+#define MSR_IA32_VMX_CR4_FIXED0                 0x488
+#define MSR_IA32_VMX_CR4_FIXED1                 0x489
+#define MSR_IA32_VMX_VMCS_ENUM                  0x48a
+#define MSR_IA32_VMX_PROCBASED_CTLS2            0x48b
+#define MSR_IA32_VMX_EPT_VPID_CAP               0x48c
+#define MSR_IA32_VMX_TRUE_PINBASED_CTLS         0x48d
+#define MSR_IA32_VMX_TRUE_PROCBASED_CTLS        0x48e
+#define MSR_IA32_VMX_TRUE_EXIT_CTLS             0x48f
+#define MSR_IA32_VMX_TRUE_ENTRY_CTLS            0x490
+#define IA32_FEATURE_CONTROL_MSR                0x3a
+#define IA32_FEATURE_CONTROL_MSR_LOCK                     0x0001
+#define IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON_INSIDE_SMX  0x0002
+#define IA32_FEATURE_CONTROL_MSR_ENABLE_VMXON_OUTSIDE_SMX 0x0004
+#define IA32_FEATURE_CONTROL_MSR_SENTER_PARAM_CTL         0x7f00
+#define IA32_FEATURE_CONTROL_MSR_ENABLE_SENTER            0x8000
+
+#define HYPERV_CPUID_VENDOR_AND_MAX_FUNCTIONS   0x40000000
+#define HYPERV_CPUID_INTERFACE                  0x40000001
+#define HYPERV_CPUID_VERSION                    0x40000002
+#define HYPERV_CPUID_FEATURES                   0x40000003
+#define HYPERV_CPUID_ENLIGHTMENT_INFO           0x40000004
+#define HYPERV_CPUID_IMPLEMENT_LIMITS           0x40000005
+
+#define HYPERV_HYPERVISOR_PRESENT_BIT           0x80000000
+#define HYPERV_CPUID_MIN                        0x40000005
+#define HYPERV_CPUID_MAX                        0x4000ffff
+
+/* Above is migrated from SimplerVisor/vmx.h */
+
+
+/* VMCS Fields */
 #define VMX_VPID					0x00000000
 #define POSTED_INTR_NOTIFICATION_VECTOR			0x00000002
 #define EPTP_INDEX					0x00000004
@@ -111,7 +236,7 @@
 #define VMX_ENTRY_EXCEPTION_EC				0x00004018
 #define VMX_ENTRY_INSTR_LENGTH				0x0000401a
 #define VMX_TPR_THRESHOLD				0x0000401c
-#define VMX_PROC_VM_EXEC_CONTROLS2			0x0000401E
+#define VMX_PROC_VM_EXEC_CONTROLS2			0x0000401e
 #define VMX_PLE_GAP			             0x00004020
 #define VMX_PLE_WINDOW                               0x00004022
 #define VMX_INSTR_ERROR					0x00004400
@@ -193,7 +318,6 @@
 #define VMX_HOST_RSP					0x00006c14
 #define VMX_HOST_RIP					0x00006c16
 
-
 typedef struct _CALLBACK_CONTEXT
 {
 	uint64_t cr3;
@@ -244,6 +368,49 @@ typedef struct _vmx_huge_pdpte
 	};
 } vmx_huge_pdpte, *pvmx_huge_pdpte;
 
+typedef struct _vmx_eptp
+{
+    union
+    {
+        struct
+        {
+            u64 type : 3;
+            u64 pg_wk_len : 3;
+            u64 enable_access_and_diry_flags : 1;
+            u64 rsvd : 5;
+            u64 pg_fr_no : 36;
+            u64 rsvd_high : 16;
+        };
+        u64 as_ull;
+    };
+} vmx_eptp, *pvmx_eptp;
+
+typedef struct _context
+{
+   uint16_t cs;
+   uint16_t ds;
+   uint16_t es;
+   uint16_t fs;
+   uint16_t gs;
+   uint16_t ss; 
+   uint32_t eflags;
+   u64 dr0;
+   u64 dr1;
+   u64 dr2;
+   u64 dr3;
+   u64 dr6;
+   u64 dr7;
+   u64 rax;
+   u64 rcx;
+   u64 rdx;
+   u64 rbx;
+   u64 rsp;
+   u64 rbp;
+   u64 si;
+   u64 rdi;
+   u64 rip;
+}vp_context, *pvp_context;
+
 typedef struct _VP_DATA
 {
 	union
@@ -252,14 +419,14 @@ typedef struct _VP_DATA
 		struct
 		{
 			special_registers 	sp_regs;
-			struct task_struct	context;
+			vp_context		context;
 			uint64_t 		sys_dir_tbl_base;
 			uint64_t 		msr[17];
 			uint64_t 		vmxon_phy_addr;
 			uint64_t		vmcs_phy_addr;
 			uint64_t		msr_bitmap_phy_addr;
 			uint64_t		ept_pml4_phy_addr;
-			uint32_t		ept_controls;
+			uint32_t		ept_ctl;
 		};
 	};
 	uint8_t	msr_bitmap[PAGE_SIZE] __attribute__((aligned(PAGE_SIZE)));
