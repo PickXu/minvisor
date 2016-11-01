@@ -90,6 +90,11 @@ static void do_vmclear(void);
 static void restore_registers(void);
 static void vmxon_exit(void); 
 static unsigned long do_vmread(unsigned long field); 
+static void restore_after_launch(void) __attribute__ ((noreturn));
+static void vmx_entry(void);
+static void vmx_entry_handler(ucontext_t* context) __attribute__ ((noreturn));
+static void vmx_resume(void) __attribute__ ((noreturn));
+static void vmx_exit_handler(pvp_state gcontext);
 
 #define MY_VMX_VMXON_RAX         ".byte 0xf3, 0x0f, 0xc7, 0x30"
 #define MY_VMX_VMPTRLD_RAX       ".byte 0x0f, 0xc7, 0x30"
@@ -101,6 +106,120 @@ static unsigned long do_vmread(unsigned long field);
 #define MY_VMX_VMXOFF            ".byte 0x0f, 0x01, 0xc4"
 #define MY_VMX_VMCALL            ".byte 0x0f, 0x01, 0xc1"
 #define MY_HLT            	 ".byte 0xf4" 
+
+static void restore_after_launch(void){
+	PVP_DATA data;
+
+        //Restore VP data
+	data = (PVP_DATA)((uintptr_t)__builtin_return_address(0) +
+                            sizeof(ucontext_t) -
+                            KERNEL_STACK_SIZE);
+   	data->context.uc_flag |= EFLAGS_ALIGN_CHECK;
+ 	setcontext(data->context);
+	
+	//should not reach here!!!
+	printk("[restore_after_launch]Guest restore failure\n");
+	asm volatile("call vmxon_exit\n");	
+}
+
+static void vmx_resume(void){
+	printk("Resume guest vm\n.");
+	asm volatile(MY_VMX_VMRESUME);
+}
+
+static void vmx_exit_handler(pvp_state gcontext) {
+	switch(gcontext->exit_reason) {
+    case EXIT_REASON_CPUID:
+        vmx_handle_cpuid(gcontext);
+        break;
+    case EXIT_REASON_INVD:
+        vmx_handle_invd();
+        break;
+    case EXIT_REASON_XSETBV:
+        vmx_handle_xsetbv(gcontext);
+        break;
+    case EXIT_REASON_VMCALL:
+    case EXIT_REASON_VMCLEAR:
+    case EXIT_REASON_VMLAUNCH:
+    case EXIT_REASON_VMPTRLD:
+    case EXIT_REASON_VMPTRST:
+    case EXIT_REASON_VMREAD:
+    case EXIT_REASON_VMRESUME:
+    case EXIT_REASON_VMWRITE:
+    case EXIT_REASON_VMXOFF:
+    case EXIT_REASON_VMXON:
+        vmx_handle_vmx(gcontext);
+        break;
+    default:
+        break;
+	}
+
+	// Move the instruction pointer to the next one
+	gcontext->guest_rip += do_vmread(VMX_EXIT_INSTR_LEN);
+	do_vmwrite(VMX_GUEST_RIP,gcontext->guest_rip);
+}
+
+static void vmx_entry_handler(ucontext_t* context){
+	vp_state guest_context;
+	PVP_DATA data;
+
+	context->uc_mcontext.gregs[REG_RCX] = *(u64*)((uintptr_t)context - sizeof(context->uc_mcontext.gregs[REG_RCX]));
+
+	//Get data for this processor
+	data = (void*)((uintptr_t)(context + 1) - KERNEL_STACK_SIZE);
+
+	// Capture the guest vp state
+	guest_context.guest_eflags = do_vmread(VMX_GUEST_RFLAGS);
+	guest_context.guest_rip = do_vmread(VMX_GUEST_RIP);
+   	guest_context.guest_rsp = do_vmread(VMX_GUEST_RSP);
+    	guest_context.exit_reason = do_vmread(VMX_EXIT_REASON) & 0xFFFF;
+    	guest_context.vp_regs = context;
+    	guest_context.exit_vm = false;	
+
+
+	// Invoke the generic exit handler
+	vmx_exit_handler(&guest_context);
+
+	//Exit or resume back to vm?
+	if (guest_context.exit_vm) {
+		context->uc_mcontext.gregs[REG_RAX] = (uintptr_t)data>>32;
+		context->uc_mcontext.gregs[REG_RBX] = (uintptr_t)data&0xffffffff;
+
+		// Restore some of the registers
+		asm volatile("lgdt %0\n"
+			: : "m" (&data->sp_regs.gdtr.limit));		
+		asm volatile("lidt %0\n"
+			: : "m" (&data->sp_regs.idtr.limit));
+		
+		// Restore cr3
+		writecr3(do_vmread(VMX_GUEST_CR3));
+	
+		// Restore the stack
+		context->uc_mcontext.gregs[REG_RSP] = guest_context.guest_rsp;
+		context->uc_mcontext.gregs[REG_RIP] = (uint64_t)guest_context.guest_rip;
+		context->uc_mcontext.uc_flags = guest_context.guest_eflags;
+
+		do_vmxoff();
+	} else {
+		// resume vm
+		// Add the RSP by 4 to eliminate the RCX pushed onto the stack
+		// in the previous assembly hook
+		context->uc_mcontext.gregs[REG_RSP] += sizeof(context->uc_mcontext.gregs[REG_RCX]);
+
+		// Set the RIP to the VMX resume
+		context->uc_mcontext.gregs[REG_RIP] = vmx_resume;
+	}
+
+	// Restore the context, either the vmx exit or guest vm resume
+	setcontext(context);
+}
+
+static void vmx_entry(void) {
+	asm volatile("pushq %%rcx\n");
+	asm volatile("leaq %%rcx,[%%rsp+8h]\n");
+	asm volatile("call getcontext\n");
+	asm volatile("jmp vmx_entry_handler\n");
+}
 
 static unsigned long do_vmread(unsigned long field) {
 	asm volatile (MY_VMX_VMREAD_RDX_RAX
@@ -600,20 +719,23 @@ static void initialize_naturalwidth_host_guest_state(PVP_DATA data) {
 
    field = VMX_HOST_RSP;
    field1 = VMX_GUEST_RSP;
+   /*
    asm ("movq %%rsp, %%rax\n" 
 	         :"=a"(value)
         );
-   do_vmwrite64(field1,value); 
-   do_vmwrite64(field,value); 
+   */
+   do_vmwrite64(field1,(uintptr_t)data->shv_stk_limit + KERNEL_STACK_SIZE - sizeof(ucontext_t)); 
+   do_vmwrite64(field,(uintptr_t)data->shv_stk_limit + KERNEL_STACK_SIZE - sizeof(ucontext_t)); 
 
-   /*
+
+   // Set the host and guest RIP, i.e. entry point
    field1 = VMX_GUEST_RIP; 
    value = (u64) guest_entry_code;
    do_vmwrite64(field1,value); 
 
    field1 = VMX_HOST_RIP; 
    value  = (u64) handle_vmexit;
-   do_vmwrite64(field1,value); */
+   do_vmwrite64(field1,value); 
 
 
    field1 = VMX_GUEST_RFLAGS;
@@ -832,6 +954,13 @@ static uint64_t readcr3(void){
    return value;
 }
 
+static void writecr3(uint64_t cr3) {
+   asm volatile("movq %0,%%cr3\n"
+		:
+		: "a" (cr3)
+		);
+}
+
 static uint64_t readcr4(void){
    uint64_t value;
    asm volatile("movq %%cr4, %0\n"
@@ -850,9 +979,9 @@ static void writecr4(uint64_t cr4) {
 static uint64_t readdr7(void){
    uint64_t value;
    asm volatile("movq %%dr7, %0\n"
-		: "=a" (value)
-		:
-		: "%rax"
+		: 
+		: "m" (value)
+		: "memory"
 		); 
    return value;
 }
@@ -900,17 +1029,15 @@ static void sldt(uint16_t* ptr){
 
 static uint64_t readeflags(void){
    uint64_t value;
-   asm volatile("pushf\n");
-   asm volatile("popf %%rax\n"
+   asm volatile("pushfq\n");
+   asm volatile("popq %%rax\n"
 		: "=a"(value)
 		);
    return value;
 } 
 
 static void capture_context(PVP_DATA data) {
-   asm volatile("movw %%cs, %%ax\n"
-		: "=a" (data->context.cs)
-		);
+   getcontext(&data->context);
 }
 
 static uint64_t vmx_launch_on_vp(PVP_DATA data) {
@@ -999,6 +1126,9 @@ static uint64_t vmx_launch_on_vp(PVP_DATA data) {
 
    // Invoke the initialization procedures
    initialize_guest_vmcs(data);
+   
+   
+   do_vmlaunch();
 }
 
 /*initialize virtual processor*/
@@ -1074,6 +1204,22 @@ static void do_vmclear(void) {
      //printk("<1> vmclear has failed!\n");
      asm volatile("vmclear_finish:\n");
      printk("<1> vmclear done!\n");
+}
+
+static void do_vmlaunch(void){
+   printk("<1> Doing vmlaunch now..\n");
+   asm volatile (MY_VMX_VMLAUNCH);
+   asm volatile("jbe vmexit_handler\n");
+   asm volatile("nop\n"); //will never get here
+   asm volatile("vmexit_handler:\n");
+
+   printk("<1> After vmexit\n");
+
+   field_1 = VMX_EXIT_REASON;
+   value_1 = do_vmread(field_1);
+   printk("<1> Guest VMexit reason: 0x%x\n",value_1);
+
+   vmxon_exit(); //do vmxoff
 }
 
 
@@ -1236,13 +1382,16 @@ static int vmxon_init(void) {
    asm ("movq $guest_entry_point, %rax");
    asm ("vmwrite %rax, %rdx");
 
+   /*
    printk("<1> Doing vmlaunch now..\n");
    asm volatile (MY_VMX_VMLAUNCH);
    asm volatile("jbe vmexit_handler\n");
    asm volatile("nop\n"); //will never get here
+   */
    asm volatile("guest_entry_point:");
    asm volatile(MY_VMX_VMCALL);
    asm volatile("ud2\n"); //will never get here
+   /*
    asm volatile("vmexit_handler:\n");
 
    printk("<1> After vmexit\n");
@@ -1252,6 +1401,7 @@ static int vmxon_init(void) {
    printk("<1> Guest VMexit reason: 0x%x\n",value_1);
 
    vmxon_exit(); //do vmxoff
+   */
    printk("<1> Enable Interrupts\n");
    asm volatile("sti\n");
 finish_here:
