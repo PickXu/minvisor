@@ -127,6 +127,24 @@ static void vmx_resume(void){
 	asm volatile(MY_VMX_VMRESUME);
 }
 
+static void vmx_handle_cpuid(pvp_state gcontext) {
+	uint32_t cpuinfo[4];
+
+	// Check whether it's magic sequence from ring 0
+	if ((gcontext->vp_regs.uc_mcontext.gregs[REG_RAX] == 0x41414141) &&
+	    (gcontext->vp_regs.uc_mcontext.gregs[REG_RCX] == 0x42424242) &&
+	    (do_vmread(VMX_GUEST_CS_SEL) & RPL_MASK) == DPL_SYSTEM) {
+		gcontext->exit_vm = true;
+		return;
+	}
+
+	asm volatile("mov %0,%%rax\n"
+			: : "m" (&gcontext->vp_regs.uc_mcontext.gregs[REG_RAX]));
+	asm volatile("mov %0,%%rcx\n"
+			: : "m" (&gcontext->vp_regs.uc_mcontext.gregs[REG_RCX]));
+
+}
+
 static void vmx_exit_handler(pvp_state gcontext) {
 	switch(gcontext->exit_reason) {
     case EXIT_REASON_CPUID:
